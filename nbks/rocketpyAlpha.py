@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from inspect import signature, getsourcelines
 import bisect
 import warnings
+from collections import namedtuple
 
 try:
     import netCDF4
@@ -5078,15 +5079,17 @@ class Rocket:
         self.distanceRocketNozzle = distanceRocketNozzle
         self.distanceRocketPropellant = distanceRocketPropellant
         
-        # Define excentricity
+        # Excentricity data initialization
         self.cpExcentricityX = 0
         self.cpExcentricityY = 0
         self.thrustExcentricityY = 0
         self.thrustExcentricityX = 0
 
-
         # Parachute data initialization
         self.parachutes = []
+
+        # Rail button data initialization
+        self.railButtons = None
 
         # Aerodynamic data initialization
         self.aerodynamicSurfaces = []
@@ -5462,6 +5465,43 @@ class Rocket:
         # Return self
         return  self.parachutes[-1]
 
+    def setRailButtons(self, distanceToCM, angularPosition=45):
+        """ Adds rail buttons to the rocket, allowing for the
+        calculation of forces exerted by them when the rocket is
+        slinding in the launch rail. Furthermore, rail buttons are
+        also needed for the simulation of the planar flight phase,
+        when the rocket experiences 3 degree of freedom motion while
+        only one rail button is still in the launch rail.
+
+        Parameters
+        ----------
+        distanceToCM : tuple, list, array
+            Two values organized in a tuple, list or array which
+            represent the distance of each of the two rail buttons
+            to the center of mass of the rocket without propellant.
+            If the rail button is position above the center of mass,
+            its distance should be a positive value. If it is below,
+            its distance should be a negative value. The order does
+            not matter. All values should be in meters.
+        angularPosition : float
+            Angular postion of the rail buttons in degrees measured
+            as the rotation around the symmetry axis of the rocket
+            relative to one of the other principal axis.
+            Default value is 45 degrees, generally used in rockets with
+            4 fins.
+
+        Returns
+        -------
+        None
+        """
+        # Order distance to CM
+        if distanceToCM[0] < distanceToCM[1]:
+            distanceToCM.reverse()
+        # Save
+        self.railButtons = self.railButtonPair(distanceToCM, angularPosition)
+    
+        return None
+
     def addCMExcentricity(self, x, y):
         """Move line of action of aerodynamic and thrust forces by
         equal translation ammount to simulate an excentricity in the
@@ -5699,6 +5739,8 @@ class Rocket:
             self.aerodynamicSurfaces.append([positionVector, chordVector])
         return None
 
+    # Variables
+    railButtonPair = namedtuple('railButtonPair', 'distanceToCM angularPosition')
 
 class Flight:
     """Keeps all flight information and has a method to simulate flight.
@@ -6371,7 +6413,7 @@ class Flight:
         freestreamSpeed = ((self.env.windVelocityX.getValueOpt(z) - vx)**2 +
                            (self.env.windVelocityY.getValueOpt(z) - vy)**2 +
                            (vz)**2)**0.5
-        freestreamMach = freestreamSpeed/340.40
+        freestreamMach = freestreamSpeed/self.env.speedOfSound.getValueOpt(z)
         dragCoeff = self.rocket.powerOnDrag.getValueOpt(freestreamMach)
 
         # Calculate Forces
@@ -6507,7 +6549,7 @@ class Flight:
         freestreamSpeed = ((windVelocityX - vx)**2 +
                            (windVelocityY - vy)**2 +
                            (vz)**2)**0.5
-        freestreamMach = freestreamSpeed/340.40
+        freestreamMach = freestreamSpeed/self.env.speedOfSound.getValueOpt(z)
 
         # Determine aerodynamics forces
         # Determine Drag Force
