@@ -9,6 +9,7 @@ import math
 import bisect
 import warnings
 import time
+import xml.etree.ElementTree as xml
 from abc import ABC, abstractmethod, abstractproperty
 from datetime import datetime, timedelta
 from inspect import signature, getsourcelines
@@ -503,6 +504,49 @@ class Motor(ABC):
         file.close()
 
         return None
+
+    def importRse(self, fileName):
+        """Read content from .rse file (RockSim XML Format)
+        and process it, in order to return the comments,
+        description and data points.
+
+        Parameters
+        ----------
+        fileName : string
+            Name of the .rse file. E.g. 'test.rse'.
+
+        Returns
+        -------
+        comments : list
+            All comments in the .rse file, separated by line in a list. Each
+            line is an entry of the list.
+        description: dict
+            Description of the motor. Each <engine> element attribute is
+            stored as a string with a key of the same name as its tag.
+        dataPoints: dict
+            Stores all relevant data points. Each element is a list containing
+            all entries for a property and with a key of same name as <eng-data>
+            attributes (cg, f, m, t). Data points are converted to floats.
+        """
+
+        # Open and parse xml
+        tree = xml.parse(fileName)
+        root = tree.getroot()
+
+        # Extract comments -> to-do
+        comments = []
+        # Extract description
+        description = root[0][0].attrib
+        # Extract engine data
+        dataPoints = {"time": [], "thrust": [], "mass": [], "center_of_mass": []}
+        for child in root.iter("eng-data"):
+            dataPoints["center_of_mass"].append(float(child.attrib["cg"]))
+            dataPoints["thrust"].append(float(child.attrib["f"]))
+            dataPoints["mass"].append(float(child.attrib["m"]))
+            dataPoints["time"].append(float(child.attrib["t"]))
+
+        # Return all extracted content
+        return comments, description, dataPoints
 
     def info(self):
         """Prints out a summary of the data and graphs available about
@@ -1539,7 +1583,7 @@ class HybridMotor(Motor):
 
         # Return Function
         return self.massDot
-    
+
     def evaluateCenterOfMass(self):
 
         pass
