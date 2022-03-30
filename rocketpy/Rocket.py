@@ -41,8 +41,8 @@ class Rocket:
             to the exit face of the nozzle, in meters. Always positive.
         Rocket.distanceRocketMotorReference : float
             Distance between rocket's center of mass, without propellant,
-            to the motor reference point, for solid and hybrid motor 
-            the reference point is the center of mass of solid propellant, 
+            to the motor reference point, for solid and hybrid motor
+            the reference point is the center of mass of solid propellant,
             in meters. Always positive.
 
         Mass and Inertia attributes:
@@ -166,7 +166,6 @@ class Rocket:
         inertiaZ,
         radius,
         distanceRocketNozzle,
-        distanceRocketMotorReference,
         powerOffDrag,
         powerOnDrag,
     ):
@@ -193,8 +192,8 @@ class Rocket:
             z axis which has an origin in the rocket's center of mass (without
             propellant) and points towards the nose cone.
         distanceRocketMotorReference : int, float
-            Distance from rocket's unloaded center of mass to the motor refencen 
-            point, for solid and hybrid motor the reference point is the center 
+            Distance from rocket's unloaded center of mass to the motor refencen
+            point, for solid and hybrid motor the reference point is the center
             of mass of solid propellant, in meters. Generally negative, meaning a negative
             position in the z axis which has an origin in the rocket's center
             of mass (with out propellant) and points towards the nose cone.
@@ -215,23 +214,28 @@ class Rocket:
         -------
         None
         """
+        # Define motor to be used
+        self.motor = motor
+
+        # Center of mass distance to points of interest
+        self.distanceRocketNozzle = distanceRocketNozzle
+        self.distanceRocketMotorReference = self.distanceRocketNozzle + self.motor.distanceNozzlePropellant
+        
         # Define rocket inertia attributes in SI units
         self.mass = mass
         self.inertiaI = inertiaI
         self.inertiaZ = inertiaZ
+
         self.centerOfMass = (
-            (distanceRocketMotorReference - motor.yCM)
+            (self.distanceRocketMotorReference - self.motor.yCM)
             * motor.mass
             / (mass + motor.mass)
         )
 
         # Define rocket geometrical parameters in SI units
         self.radius = radius
-        self.area = np.pi * self.radius ** 2
+        self.area = np.pi * self.radius**2
 
-        # Center of mass distance to points of interest
-        self.distanceRocketNozzle = distanceRocketNozzle
-        self.distanceRocketMotorReference = distanceRocketMotorReference
 
         # Excentricity data initialization
         self.cpExcentricityX = 0
@@ -267,9 +271,6 @@ class Rocket:
             "spline",
             "constant",
         )
-
-        # Define motor to be used
-        self.motor = motor
 
         # Important dynamic inertial quantities
         self.reducedMass = None
@@ -436,9 +437,9 @@ class Rocket:
 
         # Calculate cp position relative to cm
         if distanceToCM < 0:
-            cpz = distanceToCM - (length / 3) * (1 + (1 - r) / (1 - r ** 2))
+            cpz = distanceToCM - (length / 3) * (1 + (1 - r) / (1 - r**2))
         else:
-            cpz = distanceToCM + (length / 3) * (1 + (1 - r) / (1 - r ** 2))
+            cpz = distanceToCM + (length / 3) * (1 + (1 - r) / (1 - r**2))
 
         # Calculate clalpha
         clalpha = -2 * (1 - r ** (-2)) * (topRadius / rref) ** 2
@@ -567,7 +568,7 @@ class Rocket:
         Ct = tipChord
         Yr = rootChord + tipChord
         s = span
-        Lf = np.sqrt((rootChord / 2 - tipChord / 2) ** 2 + span ** 2)
+        Lf = np.sqrt((rootChord / 2 - tipChord / 2) ** 2 + span**2)
         radius = self.radius if radius == 0 else radius
         d = 2 * radius
 
@@ -630,7 +631,7 @@ class Rocket:
                 # Retrieve parameters for calculations
                 Af = (Cr + Ct) * span / 2
                 # fin area
-                AR = 2 * (span ** 2) / Af  # Aspect ratio
+                AR = 2 * (span**2) / Af  # Aspect ratio
                 gamac = np.arctan((Cr - Ct) / (2 * span))
                 # mid chord angle
                 FD = 2 * np.pi * AR / (cn * np.cos(gamac))
@@ -639,7 +640,7 @@ class Rocket:
                     * FD
                     * (Af / self.area)
                     * np.cos(gamac)
-                    / (2 + FD * (1 + (4 / FD ** 2)) ** 0.5)
+                    / (2 + FD * (1 + (4 / FD**2)) ** 0.5)
                 )
                 return Cnalfa1
 

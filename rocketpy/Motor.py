@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
 
-from Function import Function
+from .Function import Function
 
 
 class Motor(ABC):
@@ -116,6 +116,7 @@ class Motor(ABC):
         self,
         thrustSource,
         burnOut,
+        distanceNozzlePropellant,
         nozzleRadius=0.0335,
         throatRadius=0.0114,
         reshapeThrustCurve=False,
@@ -138,6 +139,12 @@ class Motor(ABC):
             Function. See help(Function). Thrust units are Newtons.
         burnOut : int, float
             Motor burn out time in seconds.
+        distanceNozzlePropellant : int, float
+            Distance from nozzle outlet to the motor reference point, which
+            for Solids and Hybrids is the center of mass of the solid propellant,
+            in meters. Generally positive, meaning a positive position in the
+            z axis which has an origin in the rocket's center of mass (without
+            propellant) and points towards the nose cone.
         nozzleRadius : int, float, optional
             Motor's nozzle outlet radius in meters. Used to calculate Kn curve.
             Optional if the Kn curve is not interesting. Its value does not impact
@@ -166,6 +173,9 @@ class Motor(ABC):
         # Thrust parameters
         self.interpolate = interpolationMethod
         self.burnOutTime = burnOut
+        
+        # Geometric parameters
+        self.distanceNozzlePropellant = distanceNozzlePropellant
 
         # Check if thrustSource is csv, eng, function or other
         if isinstance(thrustSource, str):
@@ -187,11 +197,29 @@ class Motor(ABC):
                 # grainInitialHeight = height
                 thrustSource = points
                 self.burnOutTime = points[-1][0]
+                self.yCM = None
             elif thrustSource[-3:] == "rse":
                 # Import content
                 comments, desc, data = self.importRse(thrustSource)
                 thrustSource = np.column_stack([data["time"], data["thrust"]])
                 self.burnOutTime = thrustSource[-1][0]
+
+                # Process cg info
+                if int(desc["auto-calc-cg"]):
+                    self.yCM = Function(
+                        np.column_stack([data["time"], data["center_of_mass"]]),
+                        interpolation="linear",
+                    )
+                    # correct for different reference frame
+                    self.yCM -= self.distanceNozzlePropellant
+                    self.yCM.setInputs("Time (s)")
+                    self.yCM.setOutputs("Propellant center of mass position (m)")
+
+                else:
+                    self.yCM = None
+
+        else:
+            self.yCM = None
         # Create thrust function
         self.thrust = Function(
             thrustSource, "Time (s)", "Thrust (N)", self.interpolate, "zero"
@@ -401,7 +429,7 @@ class Motor(ABC):
 
     @property
     def throatArea(self):
-        return np.pi * self.throatRadius ** 2
+        return np.pi * self.throatRadius**2
 
     @abstractmethod
     def evaluateInertia(self):
@@ -555,7 +583,7 @@ class Motor(ABC):
         # Extract engine data
         dataPoints = {"time": [], "thrust": [], "mass": [], "center_of_mass": []}
         for child in root.iter("eng-data"):
-            dataPoints["center_of_mass"].append(float(child.attrib["cg"]))
+            dataPoints["center_of_mass"].append(float(child.attrib["cg"]) / 1000)
             dataPoints["thrust"].append(float(child.attrib["f"]))
             dataPoints["mass"].append(float(child.attrib["m"]))
             dataPoints["time"].append(float(child.attrib["t"]))
@@ -763,6 +791,7 @@ class SolidMotor(Motor):
         self,
         thrustSource,
         burnOut,
+        distanceNozzlePropellant,
         grainNumber,
         grainDensity,
         grainOuterRadius,
@@ -831,6 +860,7 @@ class SolidMotor(Motor):
         super().__init__(
             thrustSource,
             burnOut,
+            distanceNozzlePropellant,
             nozzleRadius,
             throatRadius,
             reshapeThrustCurve,
@@ -856,17 +886,18 @@ class SolidMotor(Motor):
         self.grainInitialVolume = (
             self.grainInitialHeight
             * np.pi
-            * (self.grainOuterRadius ** 2 - self.grainInitialInnerRadius ** 2)
+            * (self.grainOuterRadius**2 - self.grainInitialInnerRadius**2)
         )
         self.grainInitialMass = self.grainDensity * self.grainInitialVolume
-        self.propellantInitialMass = self.grainNumber * self.grainInitialMass 
-        
+        self.propellantInitialMass = self.grainNumber * self.grainInitialMass
+
         # Dynamic quantities
         self.evaluateMassDot()
         self.evaluateMass()
         self.evaluateGeometry()
         self.evaluateInertia()
-        self.evaluateCenterOfMass()
+        if self.yCM is None:
+            self.evaluateCenterOfMass()
 
     @property
     def exhaustVelocity(self):
@@ -967,9 +998,9 @@ class SolidMotor(Motor):
             grainMassDot = self.massDot(t) / self.grainNumber
             rI, h = y
             rIDot = (
-                -0.5 * grainMassDot / (density * np.pi * (rO ** 2 - rI ** 2 + rI * h))
+                -0.5 * grainMassDot / (density * np.pi * (rO**2 - rI**2 + rI * h))
             )
-            hDot = 1.0 * grainMassDot / (density * np.pi * (rO ** 2 - rI ** 2 + rI * h))
+            hDot = 1.0 * grainMassDot / (density * np.pi * (rO**2 - rI**2 + rI * h))
             return [rIDot, hDot]
 
         # Solve the system of differential equations
@@ -1016,8 +1047,8 @@ class SolidMotor(Motor):
             2
             * np.pi
             * (
-                self.grainOuterRadius ** 2
-                - self.grainInnerRadius ** 2
+                self.grainOuterRadius**2
+                - self.grainInnerRadius**2
                 + self.grainInnerRadius * self.grainHeight
             )
             * self.grainNumber
@@ -1088,8 +1119,8 @@ class SolidMotor(Motor):
         grainMassDot = self.massDot / self.grainNumber
         grainNumber = self.grainNumber
         grainInertiaI = grainMass * (
-            (1 / 4) * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
-            + (1 / 12) * self.grainHeight ** 2
+            (1 / 4) * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
+            + (1 / 12) * self.grainHeight**2
         )
 
         # Calculate each grain's distance d to propellant center of mass
@@ -1098,7 +1129,7 @@ class SolidMotor(Motor):
         d = d * (self.grainInitialHeight + self.grainSeparation)
 
         # Calculate inertia for all grains
-        self.inertiaI = grainNumber * grainInertiaI + grainMass * np.sum(d ** 2)
+        self.inertiaI = grainNumber * grainInertiaI + grainMass * np.sum(d**2)
         self.inertiaI.setOutputs("Propellant Inertia I (kg*m2)")
 
         # Inertia I Dot
@@ -1106,8 +1137,8 @@ class SolidMotor(Motor):
         grainInertiaIDot = (
             grainMassDot
             * (
-                (1 / 4) * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
-                + (1 / 12) * self.grainHeight ** 2
+                (1 / 4) * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
+                + (1 / 12) * self.grainHeight**2
             )
             + grainMass
             * ((1 / 2) * self.grainInnerRadius - (1 / 3) * self.grainHeight)
@@ -1116,7 +1147,7 @@ class SolidMotor(Motor):
 
         # Calculate inertia I dot for all grains
         self.inertiaIDot = grainNumber * grainInertiaIDot + grainMassDot * np.sum(
-            d ** 2
+            d**2
         )
         self.inertiaIDot.setOutputs("Propellant Inertia I Dot (kg*m2/s)")
 
@@ -1124,13 +1155,13 @@ class SolidMotor(Motor):
         self.inertiaZ = (
             (1 / 2.0)
             * self.mass
-            * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
+            * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
         )
         self.inertiaZ.setOutputs("Propellant Inertia Z (kg*m2)")
 
         # Inertia Z Dot
         self.inertiaZDot = (1 / 2.0) * self.massDot * (
-            self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2
+            self.grainOuterRadius**2 + self.grainInnerRadius**2
         ) + self.mass * self.grainInnerRadius * self.burnRate
         self.inertiaZDot.setOutputs("Propellant Inertia Z Dot (kg*m2/s)")
 
@@ -1382,6 +1413,7 @@ class HybridMotor(Motor):
         self,
         thrustSource,
         burnOut,
+        distanceNozzlePropellant,
         grainNumber,
         grainDensity,
         grainOuterRadius,
@@ -1471,48 +1503,17 @@ class HybridMotor(Motor):
         -------
         None
         """
-        # Thrust parameters
-        self.interpolate = interpolationMethod
-        self.burnOutTime = burnOut
-
-        # Check if thrustSource is csv, eng, function or other
-        if isinstance(thrustSource, str):
-            # Determine if csv or eng
-            if thrustSource[-3:] == "eng":
-                # Import content
-                comments, desc, points = self.importEng(thrustSource)
-                # Process description and points
-                # diameter = float(desc[1])/1000
-                # height = float(desc[2])/1000
-                # mass = float(desc[4])
-                # nozzleRadius = diameter/4
-                # throatRadius = diameter/8
-                # grainNumber = grainnumber
-                # grainVolume = height*np.pi*((diameter/2)**2 -(diameter/4)**2)
-                # grainDensity = mass/grainVolume
-                # grainOuterRadius = diameter/2
-                # grainInitialInnerRadius = diameter/4
-                # grainInitialHeight = height
-                thrustSource = points
-                self.burnOutTime = points[-1][0]
-
-        # Create thrust function
-        self.thrust = Function(
-            thrustSource, "Time (s)", "Thrust (N)", self.interpolate, "zero"
+        super().__init__(
+            thrustSource,
+            burnOut,
+            distanceNozzlePropellant,
+            nozzleRadius,
+            throatRadius,
+            reshapeThrustCurve,
+            interpolationMethod,
         )
-        if callable(thrustSource) or isinstance(thrustSource, (int, float)):
-            self.thrust.setDiscrete(0, burnOut, 50, self.interpolate, "zero")
 
-        # Reshape curve and calculate impulse
-        if reshapeThrustCurve:
-            self.reshapeThrustCurve(*reshapeThrustCurve)
-        else:
-            self.evaluateTotalImpulse()
-
-        # Define motor attributes
-        # Grain and nozzle parameters
-        self.nozzleRadius = nozzleRadius
-        self.throatRadius = throatRadius
+        # Propellant parameters
         self.grainNumber = grainNumber
         self.grainSeparation = grainSeparation
         self.grainDensity = grainDensity
@@ -1528,43 +1529,33 @@ class HybridMotor(Motor):
         self.distanceGrainToTank = distanceGrainToTank
         self.injectorArea = injectorArea
         # Other quantities that will be computed
-        self.massDot = None
-        self.yCM = None
         self.oxidizerInitialMass = None
-        self.mass = None
         self.grainInnerRadius = None
         self.grainHeight = None
         self.burnArea = None
         self.Kn = None
         self.burnRate = None
-        self.inertiaI = None
-        self.inertiaIDot = None
-        self.inertiaZ = None
-        self.inertiaZDot = None
-        self.maxThrust = None
-        self.maxThrustTime = None
-        self.averageThrust = None
 
-        # Compute uncalculated quantities
-        # Thrust information - maximum and average
-        self.maxThrust = np.amax(self.thrust.source[:, 1])
-        maxThrustIndex = np.argmax(self.thrust.source[:, 1])
-        self.maxThrustTime = self.thrust.source[maxThrustIndex, 0]
-        self.averageThrust = self.totalImpulse / self.burnOutTime
         # Grains initial geometrical parameters
         self.grainInitialVolume = (
             self.grainInitialHeight
             * np.pi
-            * (self.grainOuterRadius ** 2 - self.grainInitialInnerRadius ** 2)
+            * (self.grainOuterRadius**2 - self.grainInitialInnerRadius**2)
         )
         self.grainInitialMass = self.grainDensity * self.grainInitialVolume
-        self.propellantInitialMass = self.grainNumber * self.grainInitialMass + self.oxidizerInitialVolume * self.oxidizerDensity
+        self.propellantInitialMass = (
+            self.grainNumber * self.grainInitialMass
+            + self.oxidizerInitialVolume * self.oxidizerDensity
+        )
+
         # Dynamic quantities
         self.evaluateMassDot()
         self.evaluateMass()
         self.evaluateGeometry()
         self.evaluateInertia()
-        self.evaluateCenterOfMass()
+
+        if self.yCM is None:
+            self.evaluateCenterOfMass()
 
     @property
     def exhaustVelocity(self):
@@ -1629,11 +1620,21 @@ class HybridMotor(Motor):
         self.liquidInitialMass = self.oxidizerInitialVolume * self.oxidizerDensity
 
         self.solidPropellantInitialCM = 0
-        self.liquidPropellantInitialCM = (self.oxidizerInitialVolume / (np.pi * (self.oxidizerTankRadius ** 2)))/2 + self.distanceGrainToTank
+        self.liquidPropellantInitialCM = (
+            self.oxidizerInitialVolume / (np.pi * (self.oxidizerTankRadius**2))
+        ) / 2 + self.distanceGrainToTank
 
-        yCM0 = (self.solidInitialMass * self.solidPropellantInitialCM + self.liquidInitialMass * self.liquidPropellantInitialCM) / (self.solidInitialMass + self.liquidInitialMass)
+        yCM0 = (
+            self.solidInitialMass * self.solidPropellantInitialCM
+            + self.liquidInitialMass * self.liquidPropellantInitialCM
+        ) / (self.solidInitialMass + self.liquidInitialMass)
 
-        self.yCM = Function([(0,yCM0),(self.burnOutTime,0)], interpolation="linear", inputs="Time (s)", outputs="Propellant center of mass position (m)")
+        self.yCM = Function(
+            [(0, yCM0), (self.burnOutTime, 0)],
+            interpolation="linear",
+            inputs="Time (s)",
+            outputs="Propellant center of mass position (m)",
+        )
 
         return self.yCM
 
@@ -1674,9 +1675,9 @@ class HybridMotor(Motor):
             grainMassDot = self.massDot(t) / self.grainNumber
             rI, h = y
             rIDot = (
-                -0.5 * grainMassDot / (density * np.pi * (rO ** 2 - rI ** 2 + rI * h))
+                -0.5 * grainMassDot / (density * np.pi * (rO**2 - rI**2 + rI * h))
             )
-            hDot = 1.0 * grainMassDot / (density * np.pi * (rO ** 2 - rI ** 2 + rI * h))
+            hDot = 1.0 * grainMassDot / (density * np.pi * (rO**2 - rI**2 + rI * h))
             return [rIDot, hDot]
 
         # Solve the system of differential equations
@@ -1723,8 +1724,8 @@ class HybridMotor(Motor):
             2
             * np.pi
             * (
-                self.grainOuterRadius ** 2
-                - self.grainInnerRadius ** 2
+                self.grainOuterRadius**2
+                - self.grainInnerRadius**2
                 + self.grainInnerRadius * self.grainHeight
             )
             * self.grainNumber
@@ -1795,8 +1796,8 @@ class HybridMotor(Motor):
         grainMassDot = self.massDot / self.grainNumber
         grainNumber = self.grainNumber
         grainInertiaI = grainMass * (
-            (1 / 4) * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
-            + (1 / 12) * self.grainHeight ** 2
+            (1 / 4) * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
+            + (1 / 12) * self.grainHeight**2
         )
 
         # Calculate each grain's distance d to propellant center of mass
@@ -1805,7 +1806,7 @@ class HybridMotor(Motor):
         d = d * (self.grainInitialHeight + self.grainSeparation)
 
         # Calculate inertia for all grains
-        self.inertiaI = grainNumber * grainInertiaI + grainMass * np.sum(d ** 2)
+        self.inertiaI = grainNumber * grainInertiaI + grainMass * np.sum(d**2)
         self.inertiaI.setOutputs("Propellant Inertia I (kg*m2)")
 
         # Inertia I Dot
@@ -1813,8 +1814,8 @@ class HybridMotor(Motor):
         grainInertiaIDot = (
             grainMassDot
             * (
-                (1 / 4) * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
-                + (1 / 12) * self.grainHeight ** 2
+                (1 / 4) * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
+                + (1 / 12) * self.grainHeight**2
             )
             + grainMass
             * ((1 / 2) * self.grainInnerRadius - (1 / 3) * self.grainHeight)
@@ -1823,7 +1824,7 @@ class HybridMotor(Motor):
 
         # Calculate inertia I dot for all grains
         self.inertiaIDot = grainNumber * grainInertiaIDot + grainMassDot * np.sum(
-            d ** 2
+            d**2
         )
         self.inertiaIDot.setOutputs("Propellant Inertia I Dot (kg*m2/s)")
 
@@ -1831,13 +1832,13 @@ class HybridMotor(Motor):
         self.inertiaZ = (
             (1 / 2.0)
             * self.mass
-            * (self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2)
+            * (self.grainOuterRadius**2 + self.grainInnerRadius**2)
         )
         self.inertiaZ.setOutputs("Propellant Inertia Z (kg*m2)")
 
         # Inertia Z Dot
         self.inertiaZDot = (1 / 2.0) * self.massDot * (
-            self.grainOuterRadius ** 2 + self.grainInnerRadius ** 2
+            self.grainOuterRadius**2 + self.grainInnerRadius**2
         ) + self.mass * self.grainInnerRadius * self.burnRate
         self.inertiaZDot.setOutputs("Propellant Inertia Z Dot (kg*m2/s)")
 
@@ -1926,7 +1927,7 @@ class HybridMotor(Motor):
 
         # Show plots
         print("\nPlots")
-        #self.thrust()
+        # self.thrust()
 
         self.yCM
 
