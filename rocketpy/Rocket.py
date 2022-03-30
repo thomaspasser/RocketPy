@@ -1007,6 +1007,49 @@ class Rocket:
         # Return None
         return None
 
+    def allInfoReturned(self):
+        """Returns as dicts all data available about the Rocket.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        ------
+        info: Dict
+            Information relevant about the Rocket class.
+        """
+
+        # Dictionary creation, if not commented follows the SI
+        info = dict(
+            totalMass=np.float64(self.totalMass(0)),
+            mass=np.float64(self.mass),
+            inertiaI=np.float64(self.inertiaI),
+            inertiaZ=np.float64(self.inertiaZ),
+            maximumRadius=np.float64(self.radius),
+            frontalArea=np.float64(self.area),
+            nozzleExitDistance=np.float64(self.distanceRocketNozzle),
+            propellantCMDistance=np.float64(self.distanceRocketPropellant),
+            loadedCM=np.float64(self.centerOfMass(0)),
+            unloadedCM=np.float64(self.centerOfMass(self.motor.burnOutTime)),
+            distanceCptoCM=np.float64(self.staticMargin(0)*self.radius*2),
+            initStaticMargin=np.float64(self.staticMargin(0)),
+            finalStaticMargin=np.float64(self.staticMargin(self.motor.burnOutTime)),
+            #parachutes=np.float64(self.parachutes),
+        )
+        for surface in self.aerodynamicSurfaces:
+            if surface[-1] =='Nose Cone':
+                info.update({"noseconeLiftCoef": np.float64(surface[1].differentiate(x=1e-2, dx=1e-3))})
+                info.update({"noseconeCP": np.float64(surface[0][2])})
+            if surface[-1] =='Fins':
+                info.update({"finsLiftCoef": np.float64(surface[1].differentiate(x=1e-2, dx=1e-3))})
+                info.update({"finsCP": np.float64(surface[0][2])})
+            if surface[-1] =='Tail':
+                info.update({"tailLiftCoef": np.float64(surface[1].differentiate(x=1e-2, dx=1e-3))})
+                info.update({"tailCP": np.float64(surface[0][2])})
+
+        return info
+
     def addFin(
         self,
         numberOfFins=4,
