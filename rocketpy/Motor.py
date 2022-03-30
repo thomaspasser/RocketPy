@@ -9,6 +9,7 @@ import math
 import bisect
 import warnings
 import time
+import xml.etree.ElementTree as xml
 from abc import ABC, abstractmethod, abstractproperty
 from datetime import datetime, timedelta
 from inspect import signature, getsourcelines
@@ -186,7 +187,11 @@ class Motor(ABC):
                 # grainInitialHeight = height
                 thrustSource = points
                 self.burnOutTime = points[-1][0]
-
+            elif thrustSource[-3:] == "rse":
+                # Import content
+                comments, desc, data = self.importRse(thrustSource)
+                thrustSource = np.column_stack([data["time"], data["thrust"]])
+                self.burnOutTime = thrustSource[-1][0]
         # Create thrust function
         self.thrust = Function(
             thrustSource, "Time (s)", "Thrust (N)", self.interpolate, "zero"
@@ -222,14 +227,6 @@ class Motor(ABC):
         maxThrustIndex = np.argmax(self.thrust.source[:, 1])
         self.maxThrustTime = self.thrust.source[maxThrustIndex, 0]
         self.averageThrust = self.totalImpulse / self.burnOutTime
-
-        self.propellantInitialMass = None
-        # Dynamic quantities
-        self.evaluateMassDot()
-        self.evaluateMass()
-        self.evaluateGeometry()
-        self.evaluateInertia()
-        self.evaluateCenterOfMass()
 
     def reshapeThrustCurve(
         self, burnTime, totalImpulse, oldTotalImpulse=None, startAtZero=True
@@ -523,6 +520,49 @@ class Motor(ABC):
 
         return None
 
+    def importRse(self, fileName):
+        """Read content from .rse file (RockSim XML Format)
+        and process it, in order to return the comments,
+        description and data points.
+
+        Parameters
+        ----------
+        fileName : string
+            Name of the .rse file. E.g. 'test.rse'.
+
+        Returns
+        -------
+        comments : list
+            All comments in the .rse file, separated by line in a list. Each
+            line is an entry of the list.
+        description: dict
+            Description of the motor. Each <engine> element attribute is
+            stored as a string with a key of the same name as its tag.
+        dataPoints: dict
+            Stores all relevant data points. Each element is a list containing
+            all entries for a property and with a key of same name as <eng-data>
+            attributes (cg, f, m, t). Data points are converted to floats.
+        """
+
+        # Open and parse xml
+        tree = xml.parse(fileName)
+        root = tree.getroot()
+
+        # Extract comments -> to-do
+        comments = []
+        # Extract description
+        description = root[0][0].attrib
+        # Extract engine data
+        dataPoints = {"time": [], "thrust": [], "mass": [], "center_of_mass": []}
+        for child in root.iter("eng-data"):
+            dataPoints["center_of_mass"].append(float(child.attrib["cg"]))
+            dataPoints["thrust"].append(float(child.attrib["f"]))
+            dataPoints["mass"].append(float(child.attrib["m"]))
+            dataPoints["time"].append(float(child.attrib["t"]))
+
+        # Return all extracted content
+        return comments, description, dataPoints
+
     def info(self):
         """Prints out a summary of the data and graphs available about
         the Motor.
@@ -788,76 +828,30 @@ class SolidMotor(Motor):
         -------
         None
         """
-        # Thrust parameters
-        self.interpolate = interpolationMethod
-        self.burnOutTime = burnOut
-
-        # Check if thrustSource is csv, eng, function or other
-        if isinstance(thrustSource, str):
-            # Determine if csv or eng
-            if thrustSource[-3:] == "eng":
-                # Import content
-                comments, desc, points = self.importEng(thrustSource)
-                # Process description and points
-                # diameter = float(desc[1])/1000
-                # height = float(desc[2])/1000
-                # mass = float(desc[4])
-                # nozzleRadius = diameter/4
-                # throatRadius = diameter/8
-                # grainNumber = grainnumber
-                # grainVolume = height*np.pi*((diameter/2)**2 -(diameter/4)**2)
-                # grainDensity = mass/grainVolume
-                # grainOuterRadius = diameter/2
-                # grainInitialInnerRadius = diameter/4
-                # grainInitialHeight = height
-                thrustSource = points
-                self.burnOutTime = points[-1][0]
-
-        # Create thrust function
-        self.thrust = Function(
-            thrustSource, "Time (s)", "Thrust (N)", self.interpolate, "zero"
+        super().__init__(
+            thrustSource,
+            burnOut,
+            nozzleRadius,
+            throatRadius,
+            reshapeThrustCurve,
+            interpolationMethod,
         )
-        if callable(thrustSource) or isinstance(thrustSource, (int, float)):
-            self.thrust.setDiscrete(0, burnOut, 50, self.interpolate, "zero")
 
-        # Reshape curve and calculate impulse
-        if reshapeThrustCurve:
-            self.reshapeThrustCurve(*reshapeThrustCurve)
-        else:
-            self.evaluateTotalImpulse()
-
-        # Define motor attributes
-        # Grain and nozzle parameters
-        self.nozzleRadius = nozzleRadius
-        self.throatRadius = throatRadius
+        # Grain  parameters
         self.grainNumber = grainNumber
         self.grainSeparation = grainSeparation
         self.grainDensity = grainDensity
         self.grainOuterRadius = grainOuterRadius
         self.grainInitialInnerRadius = grainInitialInnerRadius
         self.grainInitialHeight = grainInitialHeight
+
         # Other quantities that will be computed
-        self.massDot = None
-        self.mass = None
         self.grainInnerRadius = None
         self.grainHeight = None
         self.burnArea = None
         self.Kn = None
         self.burnRate = None
-        self.inertiaI = None
-        self.inertiaIDot = None
-        self.inertiaZ = None
-        self.inertiaZDot = None
-        self.maxThrust = None
-        self.maxThrustTime = None
-        self.averageThrust = None
 
-        # Compute uncalculated quantities
-        # Thrust information - maximum and average
-        self.maxThrust = np.amax(self.thrust.source[:, 1])
-        maxThrustIndex = np.argmax(self.thrust.source[:, 1])
-        self.maxThrustTime = self.thrust.source[maxThrustIndex, 0]
-        self.averageThrust = self.totalImpulse / self.burnOutTime
         # Grains initial geometrical parameters
         self.grainInitialVolume = (
             self.grainInitialHeight
@@ -866,6 +860,7 @@ class SolidMotor(Motor):
         )
         self.grainInitialMass = self.grainDensity * self.grainInitialVolume
         self.propellantInitialMass = self.grainNumber * self.grainInitialMass 
+        
         # Dynamic quantities
         self.evaluateMassDot()
         self.evaluateMass()
