@@ -142,8 +142,8 @@ class Rocket:
         Aerodynamic attributes
         Rocket.aerodynamicSurfaces : list
             List of aerodynamic surfaces of the rocket.
-        Rocket.staticMargin : float
-            Float value corresponding to rocket static margin when
+        Rocket.staticMargin : Function
+            Function corresponding to rocket static margin when
             loaded with propellant in units of rocket diameter or
             calibers.
         Rocket.powerOffDrag : Function

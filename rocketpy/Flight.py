@@ -1252,8 +1252,8 @@ class Flight:
         M = Mt + Mr
         mu = (Mt * Mr) / (Mt + Mr)
         # Geometry
-        b = -self.rocket.distanceRocketMotorReference
-        c = -self.rocket.distanceRocketNozzle
+        b = - (self.rocket.distanceRocketMotorReference - self.rocket.motor.yCM.getValueOpt(t))
+        c = - self.rocket.distanceRocketNozzle
         a = b * Mt / M
         rN = self.rocket.motor.nozzleRadius
         # Prepare transformation matrix
@@ -1780,7 +1780,7 @@ class Flight:
         self.aerodynamicSpinMoment = self.M3
         self.aerodynamicSpinMoment.setOutputs("Aerodynamic Spin Moment (N m)")
         # Energy
-        b = -self.rocket.distanceRocketMotorReference
+        b = - (self.rocket.distanceRocketMotorReference - self.rocket.motor.yCM) 
         totalMass = self.rocket.totalMass
         mu = self.rocket.reducedMass
         Rz = self.rocket.inertiaZ
