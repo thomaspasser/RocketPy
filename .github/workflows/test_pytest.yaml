@@ -1,3 +1,4 @@
+# Sorces: https://github.com/codecov/codecov-action
 name: PyTest
 
 on: [pull_request]
@@ -27,6 +28,14 @@ jobs:
     - name: Build RocketPy
       run: |
         python setup.py install
-    - name: Test with pytest
+    - name: Generate coverage report
       run: |
-        pytest
+        pytest --cov=./ --cov-report=xml
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        directory: ./coverage/reports/
+        env_vars: OS,PYTHON
+        path_to_write_report: ./coverage/codecov_report.txt
+        verbose: true
+        
