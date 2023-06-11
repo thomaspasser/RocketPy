@@ -8,7 +8,9 @@ __license__ = "MIT"
 
 import math
 import time
+from typing import List, Optional, Sequence, Union
 import warnings
+from scipy.spatial.transform import Rotation
 
 from copy import deepcopy
 
@@ -26,11 +28,8 @@ try:
 except ImportError:
     from .tools import cached_property
 
-try:
-    from functools import cached_property
-except ImportError:
-    from .tools import cached_property
-
+from .Rocket import Rocket
+from .Environment import Environment
 
 class Flight:
     """Keeps all flight information and has a method to simulate flight.
@@ -515,8 +514,8 @@ class Flight:
 
     def __init__(
         self,
-        rocket,
-        environment,
+        rocket: Rocket,
+        environment: Environment,
         inclination=80,
         heading=90,
         initialSolution=None,
@@ -597,7 +596,6 @@ class Flight:
         # Fetch helper classes and functions
         FlightPhases = self.FlightPhases
         TimeNodes = self.TimeNodes
-        timeIterator = self.timeIterator
 
         # Save rocket, parachutes, environment, maximum simulation time
         # and termination events
@@ -639,7 +637,7 @@ class Flight:
         self.flightPhases.addPhase(self.maxTime)
 
         # Simulate flight
-        for phase_index, phase in timeIterator(self.flightPhases):
+        for phase_index, phase in self.timeIterator(self.flightPhases):
             # print('\nCurrent Flight Phase List')
             # print(self.flightPhases)
             # print('\n\tCurrent Flight Phase')
@@ -693,7 +691,7 @@ class Flight:
             # print('\tTime Nodes Length: ', str(len(phase.timeNodes)), ' | Time Nodes Preview: ', phase.timeNodes[0:3])
 
             # Iterate through time nodes
-            for node_index, node in timeIterator(phase.timeNodes):
+            for node_index, node in self.timeIterator(phase.timeNodes):
                 # print('\n\t\tCurrent Time Node')
                 # print('\t\tIndex: ', node_index, ' | Time Node: ', node)
                 # Determine time bound for this time node
@@ -982,7 +980,7 @@ class Flight:
                             # print('\t\t\t\tOvershootable Nodes Length: ', str(len(overshootableNodes)), ' | Overshootable Nodes: ', overshootableNodes)
                             # Feed overshootable time nodes trigger
                             interpolator = phase.solver.dense_output()
-                            for overshootable_index, overshootableNode in timeIterator(
+                            for overshootable_index, overshootableNode in self.timeIterator(
                                 overshootableNodes
                             ):
                                 # print('\n\t\t\t\tCurrent Overshootable Node')
@@ -1302,35 +1300,12 @@ class Flight:
 
         # Retrieve integration data
         x, y, z, vx, vy, vz, e0, e1, e2, e3, omega1, omega2, omega3 = u
+        v = np.array([vx, vy, vz])
+        omega = np.array([omega1, omega2, omega3])
+
         # Determine lift force and moment
         R1, R2 = 0, 0
-        M1, M2, M3 = 0, 0, 0
-        # Determine current behavior
-        if t < self.rocket.motor.burnOutTime:
-            # Motor burning
-            # Retrieve important motor quantities
-            # Inertias
-            Tz = self.rocket.motor.inertiaZ.getValueOpt(t)
-            Ti = self.rocket.motor.inertiaI.getValueOpt(t)
-            TzDot = self.rocket.motor.inertiaZDot.getValueOpt(t)
-            TiDot = self.rocket.motor.inertiaIDot.getValueOpt(t)
-            # Mass
-            MtDot = self.rocket.motor.massDot.getValueOpt(t)
-            Mt = self.rocket.motor.mass.getValueOpt(t)
-            # Thrust
-            Thrust = self.rocket.motor.thrust.getValueOpt(t)
-            # Off center moment
-            M1 += self.rocket.thrustEccentricityX * Thrust
-            M2 -= self.rocket.thrustEccentricityY * Thrust
-        else:
-            # Motor stopped
-            # Retrieve important motor quantities
-            # Inertias
-            Tz, Ti, TzDot, TiDot = 0, 0, 0, 0
-            # Mass
-            MtDot, Mt = 0, 0
-            # Thrust
-            Thrust = 0
+        M1, M2, M3, Tz, Ti, TzDot, TiDot, MtDot, Mt, Thrust = self._get_motor_details(t)
 
         # Retrieve important quantities
         # Inertias
@@ -1342,7 +1317,7 @@ class Flight:
         mu = (Mt * Mr) / (Mt + Mr)
         # Geometry
         # b = -self.rocket.distanceRocketPropellant
-        b = (
+        propellant_offset = (
             -(
                 self.rocket.centerOfPropellantPosition(0)
                 - self.rocket.centerOfDryMassPosition
@@ -1350,34 +1325,27 @@ class Flight:
             * self.rocket._csys
         )
         # c = -self.rocket.distanceRocketNozzle
-        c = (
+        motor_offset = (
             -(self.rocket.motorPosition - self.rocket.centerOfDryMassPosition)
             * self.rocket._csys
         )
-        a = b * Mt / M
+        # TODO figure out what a, b, c are and write it!?
+        a = propellant_offset * Mt / M
         rN = self.rocket.motor.nozzleRadius
         # Prepare transformation matrix
-        a11 = 1 - 2 * (e2**2 + e3**2)
-        a12 = 2 * (e1 * e2 - e0 * e3)
-        a13 = 2 * (e1 * e3 + e0 * e2)
-        a21 = 2 * (e1 * e2 + e0 * e3)
-        a22 = 1 - 2 * (e1**2 + e3**2)
-        a23 = 2 * (e2 * e3 - e0 * e1)
-        a31 = 2 * (e1 * e3 - e0 * e2)
-        a32 = 2 * (e2 * e3 + e0 * e1)
-        a33 = 1 - 2 * (e1**2 + e2**2)
+        quat = np.array([e1, e2, e3, e0])
+        Krot = Rotation.from_quat(quat)
+
         # Transformation matrix: (123) -> (XYZ)
-        K = [[a11, a12, a13], [a21, a22, a23], [a31, a32, a33]]
-        # Transformation matrix: (XYZ) -> (123) or K transpose
-        Kt = [[a11, a21, a31], [a12, a22, a32], [a13, a23, a33]]
+        K = Krot.as_matrix()
+        Kt = K.T
 
         # Calculate Forces and Moments
         # Get freestream speed
-        windVelocityX = self.env.windVelocityX.getValueOpt(z)
-        windVelocityY = self.env.windVelocityY.getValueOpt(z)
-        freestreamSpeed = (
-            (windVelocityX - vx) ** 2 + (windVelocityY - vy) ** 2 + (vz) ** 2
-        ) ** 0.5
+        windVelocity = np.array([self.env.windVelocityX.getValueOpt(z),
+                                 self.env.windVelocityY.getValueOpt(z),
+                                 0])
+        freestreamSpeed = np.linalg.norm(windVelocity - v)
         freestreamMach = freestreamSpeed / self.env.speedOfSound.getValueOpt(z)
 
         # Determine aerodynamics forces
@@ -1387,14 +1355,14 @@ class Flight:
         else:
             dragCoeff = self.rocket.powerOffDrag.getValueOpt(freestreamMach)
         rho = self.env.density.getValueOpt(z)
-        R3 = -0.5 * rho * (freestreamSpeed**2) * self.rocket.area * (dragCoeff)
+        R3 = -0.5 * rho * freestreamSpeed**2 * self.rocket.area * dragCoeff
         # Off center moment
         M1 += self.rocket.cpEccentricityY * R3
         M2 -= self.rocket.cpEccentricityX * R3
         # Get rocket velocity in body frame
-        vxB = a11 * vx + a21 * vy + a31 * vz
-        vyB = a12 * vx + a22 * vy + a32 * vz
-        vzB = a13 * vx + a23 * vy + a33 * vz
+        # vB = Krot.inv().apply(v)
+        vB = Kt @ v
+
         # Calculate lift and moment for each component of the rocket
         for aeroSurface, position in self.rocket.aerodynamicSurfaces:
             compCp = (
@@ -1403,41 +1371,42 @@ class Flight:
             surfaceRadius = aeroSurface.rocketRadius
             referenceArea = np.pi * surfaceRadius**2
             # Component absolute velocity in body frame
-            compVxB = vxB + compCp * omega2
-            compVyB = vyB - compCp * omega1
-            compVzB = vzB
+            # right before eq. (7) in article
+            # compVB = v_i
+            r_i = np.array([0, 0, compCp])
+            compVB = vB + np.cross(omega, r_i)
+
             # Wind velocity at component
+            # TODO not sure if I understand this - could it be wrong?
+            # if z is in inertial frame, shouldn't we rotate component offset?
             compZ = z + compCp
-            compWindVx = self.env.windVelocityX.getValueOpt(compZ)
-            compWindVy = self.env.windVelocityY.getValueOpt(compZ)
+
+            compWind = np.array([self.env.windVelocityX.getValueOpt(compZ),
+                                 self.env.windVelocityY.getValueOpt(compZ),
+                                 0])
             # Component freestream velocity in body frame
-            compWindVxB = a11 * compWindVx + a21 * compWindVy
-            compWindVyB = a12 * compWindVx + a22 * compWindVy
-            compWindVzB = a13 * compWindVx + a23 * compWindVy
-            compStreamVxB = compWindVxB - compVxB
-            compStreamVyB = compWindVyB - compVyB
-            compStreamVzB = compWindVzB - compVzB
-            compStreamSpeed = (
-                compStreamVxB**2 + compStreamVyB**2 + compStreamVzB**2
-            ) ** 0.5
+            compWindVB = Kt @ compWind
+            compStreamV = compWindVB - compVB
+            compStreamSpeed = np.linalg.norm(compStreamV)
             # Component attack angle and lift force
             compAttackAngle = 0
             compLift, compLiftXB, compLiftYB = 0, 0, 0
-            if compStreamVxB**2 + compStreamVyB**2 != 0:
+            # TODO why do we need this check
+            if (compStreamV[0] != 0) or (compStreamV[1] != 0):
                 # Normalize component stream velocity in body frame
-                compStreamVzBn = compStreamVzB / compStreamSpeed
+                compStreamVzBn = compStreamV[2] / compStreamSpeed
+                # TODO what is this check for
                 if -1 * compStreamVzBn < 1:
                     compAttackAngle = np.arccos(-compStreamVzBn)
-                    cLift = aeroSurface.cl(compAttackAngle, freestreamMach)
                     cLift = aeroSurface.cl(compAttackAngle, freestreamMach)
                     # Component lift force magnitude
                     compLift = (
                         0.5 * rho * (compStreamSpeed**2) * referenceArea * cLift
                     )
                     # Component lift force components
-                    liftDirNorm = (compStreamVxB**2 + compStreamVyB**2) ** 0.5
-                    compLiftXB = compLift * (compStreamVxB / liftDirNorm)
-                    compLiftYB = compLift * (compStreamVyB / liftDirNorm)
+                    liftDirNorm = np.linalg.norm(compStreamV[:2])
+                    compLiftXB = compLift * (compStreamV[0] / liftDirNorm)
+                    compLiftYB = compLift * (compStreamV[1] / liftDirNorm)
                     # Add to total lift force
                     R1 += compLiftXB
                     R2 += compLiftYB
@@ -1445,6 +1414,9 @@ class Flight:
                     M1 -= (compCp + a) * compLiftYB
                     M2 += (compCp + a) * compLiftXB
             # Calculates Roll Moment
+            # TODO wtf is this try statement
+            # when is attributeerror expected?
+            # it should be more clear exactly what statement it could be
             try:
                 Clfdelta, Cldomega, cantAngleRad = aeroSurface.rollParameters
                 M3f = (
@@ -1468,42 +1440,126 @@ class Flight:
                 pass
         # Calculate derivatives
         # Angular acceleration
-        alpha1 = (
-            M1
-            - (
-                omega2 * omega3 * (Rz + Tz - Ri - Ti - mu * b**2)
-                + omega1
-                * (
-                    (TiDot + MtDot * (Mr - 1) * (b / M) ** 2)
-                    - MtDot * ((rN / 2) ** 2 + (c - b * mu / Mr) ** 2)
+        # TODO this is just bad. what the hell is going on
+        # either provide references or matrixify it, if that makes it more clear
+        # or split into more steps. like adding all forces before
+        
+        # this looks like M1,M2,M3 are moments so alpha = I^(-1) (M - w x I w)
+        # but where is I inverse.. ah there is a denominator
+        # so probably this is similar? but I am missing some stuff..
+        # I = np.diag([Ri, Ri, Rz])
+        # Iinv = np.diag(1/Ri, 1/Ri, 1/Rz)
+        # alpha = Iinv @ (M - np.cross(omega, I @ omega))
+        # L = I*omega
+        # M = dL/dt = two terms, one because inertia is changing, and one because velocity is changing
+        # makes sense to define the two and write it out.. hmm
+        # in the body frame we need to use the transport eq so
+        # M = dL/dt + omega x L = dI/dt*omega + I*domega/dt + omega x I*omega
+        # => domega/dt = Iinv* ( M - dI/dt*omega - omega x I*omega )
+        
+        # in body frame I is diagonal so Iinv is also. 
+        # thus alpha1 = 1/I1 * (M1 - (omega2*I3*omega3 - omega3*I2*omega2) - dI1/dt*omega1)
+        #             = 1/I1 * (M1 - omega2*omega3*(I3-I2)) - dI1/dt*omega1
+
+        # plan
+        # 1 understand all the code - maybe by rewriting it 
+        # 2 clean up my changes
+        # 3 test that results are unchanged
+        # 4 make a PR
+
+        # found this line above somewhere:
+        I1, I2, I3 = (Ri + Ti + mu * propellant_offset**2), (Ri + Ti + mu * propellant_offset**2), (Rz + Tz)
+        # I = np.diag([I1, I2, I3])
+        # Mvec = np.array([M1, M2, M3])
+
+        # TODO check how these I1dot and I2dot comes out
+        I1dot = (
+                    (TiDot + MtDot * (Mr - 1) * (propellant_offset / M) ** 2)
+                    - MtDot * ((rN / 2) ** 2 + (motor_offset - propellant_offset * mu / Mr) ** 2)
                 )
-            )
-        ) / (Ri + Ti + mu * b**2)
-        alpha2 = (
-            M2
-            - (
-                omega1 * omega3 * (Ri + Ti + mu * b**2 - Rz - Tz)
-                + omega2
-                * (
-                    (TiDot + MtDot * (Mr - 1) * (b / M) ** 2)
-                    - MtDot * ((rN / 2) ** 2 + (c - b * mu / Mr) ** 2)
+
+        I2dot = (
+                    (TiDot + MtDot * (Mr - 1) * (propellant_offset / M) ** 2)
+                    - MtDot * ((rN / 2) ** 2 + (motor_offset - propellant_offset * mu / Mr) ** 2)
                 )
-            )
-        ) / (Ri + Ti + mu * b**2)
-        alpha3 = (M3 - omega3 * (TzDot - MtDot * (rN**2) / 2)) / (Rz + Tz)
+
+        I3dot = (TzDot - MtDot * (rN**2) / 2)
+        # Idot = np.diag([I1dot, I2dot, I3dot])
+
+        alpha1 = (M1 - (omega2 * omega3 * (I3 - I2)
+                         + omega1 * I1dot)
+                 ) / I1
+
+        alpha2 = (M2 - (omega1 * omega3 * (I1 - I3)
+                        + omega2 * I2dot)
+                 ) / I2
+
+        # since I1 = I2, a term cancels out here
+        alpha3 = (M3 - omega3 * I3dot) / I3
+
+        # this gives the same, but the simplification above is probably faster
+        # alpha = np.linalg.inv(I) @ (Mvec - Idot @ omega - np.cross(omega, I @ omega))
+        # alpha1, alpha2, alpha3 = alpha
+        alpha = np.array([alpha1, alpha2, alpha3])
+
         # Euler parameters derivative
-        e0Dot = 0.5 * (-omega1 * e1 - omega2 * e2 - omega3 * e3)
-        e1Dot = 0.5 * (omega1 * e0 + omega3 * e2 - omega2 * e3)
-        e2Dot = 0.5 * (omega2 * e0 - omega3 * e1 + omega1 * e3)
-        e3Dot = 0.5 * (omega3 * e0 + omega2 * e1 - omega1 * e2)
+        # TODO rewrite with skew etc.
+        Omega = np.array([[0, omega3, -omega2, omega1],
+                          [-omega3, 0, omega1, omega2],
+                          [omega2, -omega1, 0, omega3],
+                          [-omega1, -omega2, -omega3, 0]])
+        eDot = 0.5 * (Omega @ quat)
+        e1Dot, e2Dot, e3Dot, e0Dot = eDot
 
         # Linear acceleration
-        L = [
-            (R1 - b * Mt * (omega2**2 + omega3**2) - 2 * c * MtDot * omega2) / M,
-            (R2 + b * Mt * (alpha3 + omega1 * omega2) + 2 * c * MtDot * omega1) / M,
-            (R3 - b * Mt * (alpha2 - omega1 * omega3) + Thrust) / M,
-        ]
-        ax, ay, az = np.dot(K, L)
+        # TODO what the hell is this
+        # L = [
+        #     (R1 - propellant_offset * Mt * (omega2**2 + omega3**2) - 2 * motor_offset * MtDot * omega2) / M,
+        #     (R2 + propellant_offset * Mt * (alpha3 + omega1 * omega2) + 2 * motor_offset * MtDot * omega1) / M,
+        #     (R3 - propellant_offset * Mt * (alpha2 - omega1 * omega3) + Thrust) / M,
+        # ]
+
+        # I think the above is wrong (but it does what the original code does)
+        
+        # a = (R+Thrust)/M  - alpha x r' - 2 omega x v' - omega x (omega x r')
+        # alpha x r' 
+        # = [alpha1, alpha2, alpha3] x [r1', r2', r3']
+        # = [alpha2*r3' - alpha3*r2',
+        #    alpha3*r1' - alpha1*r3',
+        #    alpha1*r2' - alpha2*r1']
+
+        # seems to indicate that r2 = r3 = 0
+        # and r1 = propellant_offset ? x-axis? huh??
+        
+        # then the omega x v' term is
+        # = [omega1, omega2, omega3] x [v1', v2', v3']
+        # = [omega2*v3' - omega3*v2',
+        #    omega3*v1' - omega1*v3',
+        #    omega1*v2' - omega2*v1']
+        # so v3 = motor_offset * Mtdot ? hmm
+
+        # and the last term is
+        # = [omega1, omega2, omega3] x ([omega1, omega2, omega3] x [r1', r2', r3'])
+        # = [omega2*(omega1*r2' - omega2*r1') - omega3*(omega3*r1' - omega1*r3'),
+        #    omega3*(omega2*r3' - omega3*r2') - omega1*(omega1*r2' - omega2*r1'),
+        #    omega1*(omega3*r1' - omega1*r3') - omega2*(omega2*r3' - omega3*r2')]
+        # which means we must have r1 = propellant_offset like before
+        # and r2 = r3 = 0
+        # I still don't understand why this is the case, on the x-axis?
+
+        # These equations give the same results as L above
+        d_CM =  -propellant_offset * Mt/M  # also the same as "a" but for the sign
+        r_CM = np.array([0, 0, d_CM])  # I changed this to be on z-axis instead of x-axis
+        vprime = np.array([0, 0, motor_offset * MtDot/M])
+
+        F_ext = np.array([R1, R2, R3 + Thrust])
+        dvdt = F_ext / M - np.cross(alpha, r_CM) - 2 * np.cross(omega, vprime) - np.cross(omega, np.cross(omega, r_CM))
+        # But how do they come to be
+
+        # Rotate from body to inertial frame
+        acceleration_temp = Krot.apply(dvdt)
+
+        ax, ay, az = acceleration_temp
         az -= self.env.g  # Include gravity
 
         # Create uDot
@@ -1542,6 +1598,36 @@ class Flight:
             self.speedOfSound_list.append([t, self.env.speedOfSound.getValueOpt(z)])
 
         return uDot
+
+    def _get_motor_details(self, t):
+        M1, M2, M3 = 0, 0, 0
+        # Determine current behavior
+        if t < self.rocket.motor.burnOutTime:
+            # Motor burning
+            # Retrieve important motor quantities
+            # Inertias
+            Tz = self.rocket.motor.inertiaZ.getValueOpt(t)
+            Ti = self.rocket.motor.inertiaI.getValueOpt(t)
+            TzDot = self.rocket.motor.inertiaZDot.getValueOpt(t)
+            TiDot = self.rocket.motor.inertiaIDot.getValueOpt(t)
+            # Mass
+            MtDot = self.rocket.motor.massDot.getValueOpt(t)
+            Mt = self.rocket.motor.mass.getValueOpt(t)
+            # Thrust
+            Thrust = self.rocket.motor.thrust.getValueOpt(t)
+            # Off center moment
+            M1 += self.rocket.thrustEccentricityX * Thrust
+            M2 -= self.rocket.thrustEccentricityY * Thrust
+        else:
+            # Motor stopped
+            # Retrieve important motor quantities
+            # Inertias
+            Tz, Ti, TzDot, TiDot = 0, 0, 0, 0
+            # Mass
+            MtDot, Mt = 0, 0
+            # Thrust
+            Thrust = 0
+        return M1,M2,M3,Tz,Ti,TzDot,TiDot,MtDot,Mt,Thrust
 
     def uDotParachute(self, t, u, postProcessing=False):
         """Calculates derivative of u state vector with respect to time
@@ -2995,10 +3081,12 @@ class Flight:
             i += 1
 
     class FlightPhases:
-        def __init__(self, init_list=[]):
-            self.list = init_list[:]
+        def __init__(self, init_list=None):
+            if init_list is None:
+                init_list = []
+            self.list: List[self.FlightPhase] = init_list
 
-        def __getitem__(self, index):
+        def __getitem__(self, index) -> Union['FlightPhase', Sequence['FlightPhase']] :
             return self.list[index]
 
         def __len__(self):
@@ -3007,7 +3095,7 @@ class Flight:
         def __repr__(self):
             return str(self.list)
 
-        def add(self, flightPhase, index=None):
+        def add(self, flightPhase: 'FlightPhase', index: Optional[int] = None) -> None:
             # Handle first phase
             if len(self.list) == 0:
                 self.list.append(flightPhase)
@@ -3078,7 +3166,7 @@ class Flight:
                     )
                     self.add(flightPhase, index + 1)
 
-        def addPhase(self, t, derivatives=None, callback=[], clear=True, index=None):
+        def addPhase(self, t: float, derivatives=None, callback=[], clear=True, index=None):
             self.add(self.FlightPhase(t, derivatives, callback, clear), index)
 
         def flushAfter(self, index):
