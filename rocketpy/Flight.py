@@ -546,7 +546,7 @@ class Flight:
             Default is 90, which points in the x direction.
         initialSolution : array, Flight, optional
             Initial solution array to be used. Format is
-            initialSolution = []
+            initialSolution = [
                 self.tInitial,
                 xInit, yInit, zInit,
                 vxInit, vyInit, vzInit,
@@ -613,12 +613,6 @@ class Flight:
         self.timeOvershoot = timeOvershoot
         self.terminateOnApogee = terminateOnApogee
         self.name = name
-
-        # Modifying Rail Length for a better out of rail condition
-        upperButtonPosition, lowerButtonPosition = self.rocket.railButtons.position
-        nozzlePosition = self.rocket.motorPosition
-        self.effective1RL = self.env.rL - abs(nozzlePosition - upperButtonPosition)
-        self.effective2RL = self.env.rL - abs(nozzlePosition - lowerButtonPosition)
 
         # Flight initialization
         self.__init_post_process_variables()
@@ -715,16 +709,31 @@ class Flight:
                     noise = parachute.noiseFunction()
                     parachute.noiseSignal.append([node.t, noise])
                     parachute.noisyPressureSignal.append([node.t, pressure + noise])
-                    if parachute.trigger(pressure + noise, self.ySol):
+                    # Gets height above ground level considering noise
+                    hAGL = (
+                        self.env.pressure.findInput(
+                            pressure + noise,
+                            overshootableNode.y[2],
+                        )
+                        - self.env.elevation
+                    )
+                    if parachute.trigger(pressure + noise, hAGL, self.ySol):
                         # print('\nEVENT DETECTED')
                         # print('Parachute Triggered')
                         # print('Name: ', parachute.name, ' | Lag: ', parachute.lag)
                         # Remove parachute from flight parachutes
                         self.parachutes.remove(parachute)
                         # Create flight phase for time after detection and before inflation
-                        self.flightPhases.addPhase(
-                            node.t, phase.derivative, clear=True, index=phase_index + 1
-                        )
+                        # Must only be created if parachute has any lag
+                        i = 1
+                        if parachute.lag != 0:
+                            self.flightPhases.addPhase(
+                                node.t,
+                                phase.derivative,
+                                clear=True,
+                                index=phase_index + i,
+                            )
+                            i += 1
                         # Create flight phase for time after inflation
                         callbacks = [
                             lambda self, parachuteCdS=parachute.CdS: setattr(
@@ -736,7 +745,7 @@ class Flight:
                             self.uDotParachute,
                             callbacks,
                             clear=False,
-                            index=phase_index + 2,
+                            index=phase_index + i,
                         )
                         # Prepare to leave loops and start new flight phase
                         phase.timeNodes.flushAfter(node_index)
@@ -1004,8 +1013,17 @@ class Flight:
                                     parachute.noisyPressureSignal.append(
                                         [overshootableNode.t, pressure + noise]
                                     )
+                                    # Gets height above ground level considering noise
+                                    hAGL = (
+                                        self.env.pressure.findInput(
+                                            pressure + noise,
+                                            overshootableNode.y[2],
+                                        )
+                                        - self.env.elevation
+                                    )
+
                                     if parachute.trigger(
-                                        pressure + noise, overshootableNode.y
+                                        pressure + noise, hAGL, overshootableNode.y
                                     ):
                                         # print('\nEVENT DETECTED')
                                         # print('Parachute Triggered')
@@ -1013,12 +1031,16 @@ class Flight:
                                         # Remove parachute from flight parachutes
                                         self.parachutes.remove(parachute)
                                         # Create flight phase for time after detection and before inflation
-                                        self.flightPhases.addPhase(
-                                            overshootableNode.t,
-                                            phase.derivative,
-                                            clear=True,
-                                            index=phase_index + 1,
-                                        )
+                                        # Must only be created if parachute has any lag
+                                        i = 1
+                                        if parachute.lag != 0:
+                                            self.flightPhases.addPhase(
+                                                overshootableNode.t,
+                                                phase.derivative,
+                                                clear=True,
+                                                index=phase_index + i,
+                                            )
+                                            i += 1
                                         # Create flight phase for time after inflation
                                         callbacks = [
                                             lambda self, parachuteCdS=parachute.CdS: setattr(
@@ -1030,7 +1052,7 @@ class Flight:
                                             self.uDotParachute,
                                             callbacks,
                                             clear=False,
-                                            index=phase_index + 2,
+                                            index=phase_index + i,
                                         )
                                         # Rollback history
                                         self.t = overshootableNode.t
@@ -1149,29 +1171,30 @@ class Flight:
 
     @cached_property
     def effective1RL(self):
-        # Modifying Rail Length for a better out of rail condition
         nozzle = (
             self.rocket.motorPosition - self.rocket.centerOfDryMassPosition
         ) * self.rocket._csys  # Kinda works for single nozzle
         try:
-            upperRButton = max(self.rocket.railButtons[0])
-        except AttributeError:  # If there is no rail button
-            upperRButton = nozzle
-        effective1RL = self.env.rL - abs(nozzle - upperRButton)
-
+            rail_buttons = self.rocket.rail_buttons[0]
+            upper_r_button = (
+                rail_buttons.component.buttons_distance + rail_buttons.position
+            )
+        except AttributeError:
+            upper_r_button = nozzle
+        effective1RL = self.env.railLength - abs(nozzle - upper_r_button)
         return effective1RL
 
     @cached_property
     def effective2RL(self):
-        # Modifying Rail Length for a better out of rail condition
         nozzle = (
             self.rocket.motorPosition - self.rocket.centerOfDryMassPosition
         ) * self.rocket._csys
         try:
-            lowerRButton = min(self.rocket.railButtons[0])
+            rail_buttons = self.rocket.rail_buttons[0]
+            lower_r_button = rail_buttons.position
         except AttributeError:
-            lowerRButton = nozzle
-        effective2RL = self.env.rL - abs(nozzle - lowerRButton)
+            lower_r_button = nozzle
+        effective2RL = self.env.railLength - abs(nozzle - lower_r_button)
         return effective2RL
 
     @cached_property
@@ -1241,7 +1264,9 @@ class Flight:
         R3 = -0.5 * rho * (freestreamSpeed**2) * self.rocket.area * (dragCoeff)
 
         # Calculate Linear acceleration
-        a3 = (R3 + Thrust) / M - (e0**2 - e1**2 - e2**2 + e3**2) * self.env.g
+        a3 = (R3 + Thrust) / M - (
+            e0**2 - e1**2 - e2**2 + e3**2
+        ) * self.env.gravity(z)
         if a3 > 0:
             ax = 2 * (e1 * e3 + e0 * e2) * a3
             ay = 2 * (e2 * e3 - e0 * e1) * a3
@@ -1560,7 +1585,7 @@ class Flight:
         acceleration_temp = Krot.apply(dvdt)
 
         ax, ay, az = acceleration_temp
-        az -= self.env.g  # Include gravity
+        az -= self.env.gravity(z)  # Include gravity
 
         # Create uDot
         uDot = [
@@ -1865,7 +1890,7 @@ class Flight:
     @funcify_method("Time (s)", "Dynamic Viscosity (Pa s)", "spline", "constant")
     def dynamicViscosity(self):
         """Air dynamic viscosity felt by the rocket as a rocketpy.Function of time."""
-        return self.retrieve_temporary_values_arrays[7]
+        return self.retrieve_temporary_values_arrays[8]
 
     @funcify_method("Time (s)", "Speed of Sound (m/s)", "spline", "constant")
     def speedOfSound(self):
@@ -2196,12 +2221,18 @@ class Flight:
     # Potential Energy
     @funcify_method("Time (s)", "Potential Energy (J)", "spline", "constant")
     def potentialEnergy(self):
-        """Potential energy as a rocketpy.Function of time."""
+        """Potential energy as a rocketpy.Function of time in relation to sea
+        level."""
+        # Constants
+        GM = 3.986004418e14
         # Redefine totalMass time grid to allow for efficient Function algebra
         totalMass = deepcopy(self.rocket.totalMass)
         totalMass.setDiscreteBasedOnModel(self.z)
-        # TODO: change calculation method to account for variable gravity
-        potentialEnergy = totalMass * self.env.g * self.z
+        potentialEnergy = (
+            GM
+            * totalMass
+            * (1 / (self.z + self.env.earthRadius) - 1 / self.env.earthRadius)
+        )
         return potentialEnergy
 
     # Total Mechanical Energy
@@ -2305,7 +2336,7 @@ class Flight:
             F11, F12 = self.calculate_rail_button_forces[0:2]
         else:
             F11, F12 = self.calculate_rail_button_forces()[0:2]
-        alpha = self.rocket.railButtons.angularPosition * (np.pi / 180)
+        alpha = self.rocket.rail_buttons[0].component.angular_position * (np.pi / 180)
         return F11 * np.cos(alpha) + F12 * np.sin(alpha)
 
     @funcify_method("Time (s)", "Upper Rail Button Shear Force (N)", "spline", "zero")
@@ -2315,7 +2346,7 @@ class Flight:
             F11, F12 = self.calculate_rail_button_forces[0:2]
         else:
             F11, F12 = self.calculate_rail_button_forces()[0:2]
-        alpha = self.rocket.railButtons.angularPosition * (
+        alpha = self.rocket.rail_buttons[0].component.angular_position * (
             np.pi / 180
         )  # Rail buttons angular position
         return F11 * -np.sin(alpha) + F12 * np.cos(alpha)
@@ -2327,7 +2358,7 @@ class Flight:
             F21, F22 = self.calculate_rail_button_forces[2:4]
         else:
             F21, F22 = self.calculate_rail_button_forces()[2:4]
-        alpha = self.rocket.railButtons.angularPosition * (np.pi / 180)
+        alpha = self.rocket.rail_buttons[0].component.angular_position * (np.pi / 180)
         return F21 * np.cos(alpha) + F22 * np.sin(alpha)
 
     @funcify_method("Time (s)", "Lower Rail Button Shear Force (N)", "spline", "zero")
@@ -2337,7 +2368,7 @@ class Flight:
             F21, F22 = self.calculate_rail_button_forces[2:4]
         else:
             F21, F22 = self.calculate_rail_button_forces()[2:4]
-        alpha = self.rocket.railButtons.angularPosition * (np.pi / 180)
+        alpha = self.rocket.rail_buttons[0].component.angular_position * (np.pi / 180)
         return F21 * -np.sin(alpha) + F22 * np.cos(alpha)
 
     @cached_property
@@ -2350,7 +2381,7 @@ class Flight:
         if self.outOfRailTimeIndex == 0:
             return 0
         else:
-            return np.max(self.railButton1NormalForce)
+            return self.railButton1NormalForce.max
 
     @cached_property
     def maxRailButton1ShearForce(self):
@@ -2362,7 +2393,7 @@ class Flight:
         if self.outOfRailTimeIndex == 0:
             return 0
         else:
-            return np.max(self.railButton1ShearForce)
+            return self.railButton1ShearForce.max
 
     @cached_property
     def maxRailButton2NormalForce(self):
@@ -2374,7 +2405,7 @@ class Flight:
         if self.outOfRailTimeIndex == 0:
             return 0
         else:
-            return np.max(self.railButton2NormalForce)
+            return self.railButton2NormalForce.max
 
     @cached_property
     def maxRailButton2ShearForce(self):
@@ -2386,7 +2417,7 @@ class Flight:
         if self.outOfRailTimeIndex == 0:
             return 0
         else:
-            return np.max(self.railButton2ShearForce)
+            return self.railButton2ShearForce.max
 
     @funcify_method(
         "Time (s)", "Horizontal Distance to Launch Point (m)", "spline", "constant"
@@ -2410,7 +2441,7 @@ class Flight:
     @funcify_method("Time (s)", "Latitude (°)", "linear", "constant")
     def latitude(self):
         """Rocket latitude coordinate, in degrees, as a rocketpy.Function of time."""
-        lat1 = np.deg2rad(self.env.lat)  # Launch lat point converted to radians
+        lat1 = np.deg2rad(self.env.latitude)  # Launch lat point converted to radians
 
         # Applies the haversine equation to find final lat/lon coordinates
         latitude = np.rad2deg(
@@ -2426,8 +2457,8 @@ class Flight:
     @funcify_method("Time (s)", "Longitude (°)", "linear", "constant")
     def longitude(self):
         """Rocket longitude coordinate, in degrees, as a rocketpy.Function of time."""
-        lat1 = np.deg2rad(self.env.lat)  # Launch lat point converted to radians
-        lon1 = np.deg2rad(self.env.lon)  # Launch lon point converted to radians
+        lat1 = np.deg2rad(self.env.latitude)  # Launch lat point converted to radians
+        lon1 = np.deg2rad(self.env.longitude)  # Launch lon point converted to radians
 
         # Applies the haversine equation to find final lat/lon coordinates
         longitude = np.rad2deg(
@@ -2606,7 +2637,7 @@ class Flight:
         F22: Function
             Rail Button 2 force in the 2 direction
         """
-        if self.rocket.railButtons is None:
+        if len(self.rocket.rail_buttons) == 0:
             warnings.warn(
                 "Trying to calculate rail button forces without rail buttons defined."
             )
@@ -2617,12 +2648,17 @@ class Flight:
             return nullForce, nullForce, nullForce, nullForce
 
         # Distance from Rail Button 1 (upper) to CM
+        rail_buttons_tuple = self.rocket.rail_buttons[0]
+        upper_button_position = (
+            rail_buttons_tuple.component.buttons_distance + rail_buttons_tuple.position
+        )
+        lower_button_position = rail_buttons_tuple.position
         D1 = (
-            self.rocket.railButtons.position[0] - self.rocket.centerOfDryMassPosition
+            upper_button_position - self.rocket.centerOfDryMassPosition
         ) * self.rocket._csys
         # Distance from Rail Button 2 (lower) to CM
         D2 = (
-            self.rocket.railButtons.position[1] - self.rocket.centerOfDryMassPosition
+            lower_button_position - self.rocket.centerOfDryMassPosition
         ) * self.rocket._csys
         F11 = (self.R1 * D2 - self.M2) / (D1 + D2)
         F11.setOutputs("Upper button force direction 1 (m)")
@@ -3122,6 +3158,7 @@ class Flight:
                     print(
                         "This may be caused by more than when parachute being triggered simultaneously."
                     )
+                    print("Or by having a negative parachute lag.")
                     self.add(flightPhase, -2)
             # Handle inserting into intermediary position
             else:
@@ -3138,6 +3175,7 @@ class Flight:
                     print(
                         "This may be caused by more than when parachute being triggered simultaneously."
                     )
+                    print("Or by having a negative parachute lag.")
                     self.add(flightPhase, index - 1)
                 elif flightPhase.t == previousPhase.t:
                     print(
